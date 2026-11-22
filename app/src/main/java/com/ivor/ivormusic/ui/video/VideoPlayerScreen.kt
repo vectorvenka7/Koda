@@ -48,6 +48,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -178,6 +180,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import com.ivor.ivormusic.data.SponsorSegment
@@ -663,6 +666,10 @@ fun FullscreenPlayerContent(
         label = "videoEndPadding"
     )
 
+    // Free pinch zoom, 100%-500%. Starts over for every video.
+    val videoZoom = rememberVideoZoomState()
+    LaunchedEffect(videoId) { videoZoom.reset() }
+
     PlayerGestureSurface(
         onToggleControls = onToggleControls,
         onSeekBackward = onSeekBackward,
@@ -679,6 +686,7 @@ fun FullscreenPlayerContent(
             if (!want || zoomAvailableNow) zoomChangeNow(want)
         },
         zoomPillMode = zoomPillMode,
+        videoZoom = videoZoom,
         onSpeedBoostStart = {
             speedBeforeBoost = exoPlayer.playbackParameters.speed
             exoPlayer.setPlaybackSpeed(2f)
@@ -721,6 +729,8 @@ fun FullscreenPlayerContent(
             },
             modifier = Modifier
                 .fillMaxSize()
+                .clipToBounds()
+                .videoZoomLayer(videoZoom)
                 .padding(end = chatInsetAnimated)
         )
 
@@ -2273,6 +2283,11 @@ internal fun PlayerGestureSurface(
     onLockedSurfaceTap: () -> Unit = {},
     onZoomedToFillChange: (Boolean) -> Unit = {},
     zoomPillMode: Boolean? = null,
+    /**
+     * Free pinch zoom (100%-500%) for the fullscreen video. When set, a pinch
+     * drives this instead of toggling zoom-to-fill; null keeps the old toggle.
+     */
+    videoZoom: VideoZoomState? = null,
     onSpeedBoostStart: () -> Unit = {},
     onSpeedBoostChange: (Float) -> Unit = {},
     onSpeedBoostEnd: () -> Unit = {},
@@ -2650,11 +2665,21 @@ internal fun PlayerGestureSurface(
 
                                 if (pressed.size > 1 && mode != 1) {
                                     mode = 2
-                                    accumulatedZoom *= event.calculateZoom()
-                                    if (accumulatedZoom > PINCH_ZOOM_IN_THRESHOLD) {
-                                        onZoomedToFillChange(true)
-                                    } else if (accumulatedZoom < PINCH_ZOOM_OUT_THRESHOLD) {
-                                        onZoomedToFillChange(false)
+                                    val zoomState = videoZoom
+                                    if (zoomState != null) {
+                                        zoomState.size = size
+                                        zoomState.transform(
+                                            centroid = event.calculateCentroid(useCurrent = true),
+                                            pan = event.calculatePan(),
+                                            zoom = event.calculateZoom()
+                                        )
+                                    } else {
+                                        accumulatedZoom *= event.calculateZoom()
+                                        if (accumulatedZoom > PINCH_ZOOM_IN_THRESHOLD) {
+                                            onZoomedToFillChange(true)
+                                        } else if (accumulatedZoom < PINCH_ZOOM_OUT_THRESHOLD) {
+                                            onZoomedToFillChange(false)
+                                        }
                                     }
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 } else if (pressed.size == 1 && mode != 2) {
@@ -2771,6 +2796,8 @@ internal fun PlayerGestureSurface(
                 )
 
                 ZoomModePill(mode = zoomPillMode)
+
+                if (videoZoom != null) VideoZoomPill(videoZoom)
             }
 
             SeekFeedbackBadge(
@@ -3160,6 +3187,44 @@ private fun SpeedBoostBadge(
  *
  * Null [mode] hides it; true is "Zoomed to fill", false is "Original".
  */
+/** Shows the current free-zoom level while zoomed in; a tap returns to 100%. */
+@Composable
+private fun VideoZoomPill(
+    zoom: VideoZoomState,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = zoom.isZoomed,
+        enter = fadeIn() + scaleIn(initialScale = 0.85f),
+        exit = fadeOut(tween(durationMillis = 180)),
+        modifier = modifier
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            shape = CircleShape,
+            onClick = { zoom.reset() }
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    Icons.Rounded.ZoomIn,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = "${zoom.percent}%",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ZoomModePill(
     mode: Boolean?,
